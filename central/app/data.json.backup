@@ -4,23 +4,23 @@
       "id": "CP001",
       "location": "Valencia",
       "price": 0.35,
-      "state": "ACTIVADO",
-      "current_kw": 0.0,
-      "total_kwh": 0.0,
-      "current_euros": 0.0,
-      "current_driver": null,
-      "last_update": "2025-12-26T21:04:32.211500"
-    },
-    "CP002": {
-      "id": "CP002",
-      "location": "Ottawa",
-      "price": 0.35,
       "state": "DESCONECTADO",
       "current_kw": 0.0,
       "total_kwh": 0.0,
       "current_euros": 0.0,
       "current_driver": null,
-      "last_update": "2025-12-26T21:03:46.900054"
+      "last_update": "2025-12-26T22:29:54.535053"
+    },
+    "CP002": {
+      "id": "CP002",
+      "location": "Ottawa",
+      "price": 0.35,
+      "state": "PARADO",
+      "current_kw": 0.0,
+      "total_kwh": 0.0,
+      "current_euros": 0.0,
+      "current_driver": null,
+      "last_update": "2025-12-26T22:27:11.796042"
     }
   },
   "drivers": {},

@@ -268,6 +268,40 @@ class WeatherControlOffice:
     
     # ==================== NOTIFICACIÓN A CENTRAL ====================
     
+    def notify_central_event(self, event_type, message, cp_id=None, city=None, temp=None, details=None):
+        """
+        Notifica un evento a Central (conexión, alerta, error, etc)
+        event_type: 'connection', 'alert', 'recovery', 'check', 'error', 'disconnect'
+        """
+        try:
+            notify_url = self.central_url.replace('/charging_points', '/weather/notify')
+            
+            payload = {
+                'type': event_type,
+                'message': message
+            }
+            
+            if cp_id:
+                payload['cp_id'] = cp_id
+            if city:
+                payload['city'] = city
+            if temp is not None:
+                payload['temp'] = temp
+            if details:
+                payload['details'] = details
+            
+            response = requests.post(notify_url, json=payload, timeout=3)
+            
+            if response.status_code == 200:
+                return True
+            else:
+                # No loguear error aquí para evitar spam
+                return False
+                
+        except Exception:
+            # Silencioso - Central puede no estar disponible
+            return False
+    
     def notify_central(self, cp_id, action):
         """
         Notifica a Central sobre estado del clima
@@ -307,22 +341,53 @@ class WeatherControlOffice:
             temp = weather['temp']
             description = weather['description']
             
-            # Log
+            # Log local
             temp_icon = "❄️" if temp < 0 else "🌡️"
             self.log(f"{temp_icon} {city:15s} ({cp_id}): {temp:5.1f}°C - {description}")
+            
+            # ✅ Notificar check a Central (silencioso)
+            self.notify_central_event(
+                event_type='check',
+                message=f"{city}: {temp:.1f}°C - {description}",
+                cp_id=cp_id,
+                city=city,
+                temp=temp
+            )
             
             # Verificar temperatura
             currently_alerted = self.alerts.get(cp_id, False)
             
             if temp < self.min_temp and not currently_alerted:
                 # ALERTA: Temperatura baja
-                self.log(f"⚠️  ALERTA FRIO: {city} ({cp_id}) - {temp:.1f}°C < {self.min_temp}°C")
+                alert_msg = f"ALERTA FRIO: {city} ({cp_id}) - {temp:.1f}°C < {self.min_temp}°C"
+                self.log(f"⚠️  {alert_msg}")
+                
+                # ✅ Notificar alerta a Central
+                self.notify_central_event(
+                    event_type='alert',
+                    message=alert_msg,
+                    cp_id=cp_id,
+                    city=city,
+                    temp=temp
+                )
+                
                 self.notify_central(cp_id, 'stop')
                 self.alerts[cp_id] = True
                 
             elif temp >= self.min_temp and currently_alerted:
                 # Temperatura recuperada
-                self.log(f"✓ Temperatura normal: {city} ({cp_id}) - {temp:.1f}°C")
+                recovery_msg = f"Temperatura normal: {city} ({cp_id}) - {temp:.1f}°C"
+                self.log(f"✓ {recovery_msg}")
+                
+                # ✅ Notificar recuperación a Central
+                self.notify_central_event(
+                    event_type='recovery',
+                    message=recovery_msg,
+                    cp_id=cp_id,
+                    city=city,
+                    temp=temp
+                )
+                
                 self.notify_central(cp_id, 'resume')
                 self.alerts[cp_id] = False
     
@@ -330,9 +395,65 @@ class WeatherControlOffice:
         """Loop principal de monitorización"""
         self.log("Iniciando loop de monitorización...")
         
+        check_count = 0
+        reload_interval = 5 // self.check_interval  # Recargar cada ~30 segundos
+        
         while self.running:
             try:
+                # ✅ Recargar ciudades desde Central periódicamente
+                if check_count % reload_interval == 0:
+                    self.log("🔄 Recargando CPs desde Central...")
+                    old_locations = dict(self.locations)  # Copiar estado anterior
+                    
+                    if self.load_locations_from_central():
+                        # Detectar cambios
+                        added = set(self.locations.keys()) - set(old_locations.keys())
+                        removed = set(old_locations.keys()) - set(self.locations.keys())
+                        changed = {cp_id for cp_id in self.locations.keys() & old_locations.keys()
+                                 if self.locations[cp_id] != old_locations[cp_id]}
+                        
+                        if added or removed or changed:
+                            self.log(f"✅ CPs actualizados: {len(self.locations)} total")
+                            
+                            if added:
+                                for cp_id in added:
+                                    self.log(f"  + NUEVO: {cp_id} → {self.locations[cp_id]}")
+                                    self.notify_central_event(
+                                        'connection',
+                                        f"Nuevo CP detectado: {cp_id} en {self.locations[cp_id]}",
+                                        cp_id=cp_id,
+                                        city=self.locations[cp_id]
+                                    )
+                            
+                            if removed:
+                                for cp_id in removed:
+                                    self.log(f"  - ELIMINADO: {cp_id} (era {old_locations[cp_id]})")
+                                    self.notify_central_event(
+                                        'disconnect',
+                                        f"CP removido: {cp_id}",
+                                        cp_id=cp_id
+                                    )
+                            
+                            if changed:
+                                for cp_id in changed:
+                                    old_city = old_locations[cp_id]
+                                    new_city = self.locations[cp_id]
+                                    self.log(f"  ↻ CAMBIADO: {cp_id} → {old_city} a {new_city}")
+                                    self.notify_central_event(
+                                        'connection',
+                                        f"Ubicación cambiada: {cp_id} de {old_city} a {new_city}",
+                                        cp_id=cp_id,
+                                        city=new_city
+                                    )
+                        else:
+                            self.log(f"ℹ️  Sin cambios en CPs ({len(self.locations)} total)")
+                    else:
+                        self.log("⚠️  No se pudo recargar desde Central")
+                
+                # Chequeo de clima
                 self.check_weather_all()
+                
+                check_count += 1
                 time.sleep(self.check_interval)
                 
             except KeyboardInterrupt:
@@ -436,9 +557,23 @@ class WeatherControlOffice:
         self.log("\n🔄 Cargando localizaciones desde Central API...")
         if self.load_locations_from_central():
             self.log(f"✓ {len(self.locations)} CPs cargados desde Central")
+            
+            # ✅ Notificar a Central que Weather se ha conectado
+            self.notify_central_event(
+                event_type='connection',
+                message=f"Weather Control Office conectado - Monitorizando {len(self.locations)} CPs",
+                details={'cp_count': len(self.locations)}
+            )
         else:
             # Si falla Central, intentar desde variable de entorno como fallback
             self.log("⚠️  No se pudo conectar con Central")
+            
+            # ✅ Notificar error de conexión
+            self.notify_central_event(
+                event_type='error',
+                message="Weather no pudo conectar con Central (usando config local)"
+            )
+            
             if self.locations:
                 self.log(f"ℹ️  Usando {len(self.locations)} CPs desde WEATHER_LOCATIONS (fallback)")
             else:
@@ -458,6 +593,13 @@ class WeatherControlOffice:
             self.log("\nInterrumpido por usuario")
         
         self.running = False
+        
+        # ✅ Notificar a Central que Weather se desconecta
+        self.notify_central_event(
+            event_type='disconnect',
+            message="Weather Control Office desconectado"
+        )
+        
         self.log("Weather Control Office finalizado")
 
 # ==================== MAIN ====================

@@ -114,6 +114,77 @@ def api_cp_command(cp_id):
         "command_sent": command_sent
     })
 
+@app.route('/api/weather/notify', methods=['POST'])
+def api_weather_notify():
+    """
+    API: Recibe notificaciones de Weather Control Office
+    Body JSON: {
+        "type": "connection" | "alert" | "recovery" | "check",
+        "message": "Weather conectado",
+        "cp_id": "CP001",  # opcional
+        "city": "Valencia",  # opcional
+        "temp": 15.5,  # opcional
+        "details": {...}  # opcional
+    }
+    """
+    payload = request.get_json() or {}
+    msg_type = payload.get("type", "info")
+    message = payload.get("message", "")
+    cp_id = payload.get("cp_id")
+    city = payload.get("city")
+    temp = payload.get("temp")
+    
+    # Log en Central
+    if msg_type == "connection":
+        print(f"[CENTRAL] 🌤️  WEATHER: {message}")
+        socketio.emit('notification', {
+            'type': 'success',
+            'message': f'🌤️ Weather: {message}'
+        }, namespace='/')
+    
+    elif msg_type == "alert":
+        print(f"[CENTRAL] ⚠️  WEATHER ALERT: {message}")
+        if cp_id and city and temp is not None:
+            print(f"[CENTRAL]     → {cp_id} ({city}): {temp:.1f}°C")
+        socketio.emit('notification', {
+            'type': 'warning',
+            'message': f'⚠️ Weather Alert: {message}'
+        }, namespace='/')
+    
+    elif msg_type == "recovery":
+        print(f"[CENTRAL] ✅ WEATHER RECOVERY: {message}")
+        if cp_id and city and temp is not None:
+            print(f"[CENTRAL]     → {cp_id} ({city}): {temp:.1f}°C")
+        socketio.emit('notification', {
+            'type': 'success',
+            'message': f'✅ Weather: {message}'
+        }, namespace='/')
+    
+    elif msg_type == "check":
+        # Checks periódicos - log silencioso en Central
+        if cp_id and city and temp is not None:
+            temp_icon = "❄️" if temp < 0 else "🌡️"
+            print(f"[CENTRAL] {temp_icon} WEATHER: {city:15s} ({cp_id}): {temp:.1f}°C")
+    
+    elif msg_type == "error":
+        print(f"[CENTRAL] ❌ WEATHER ERROR: {message}")
+        socketio.emit('notification', {
+            'type': 'error',
+            'message': f'❌ Weather: {message}'
+        }, namespace='/')
+    
+    elif msg_type == "disconnect":
+        print(f"[CENTRAL] 🌧️  WEATHER: {message}")
+        socketio.emit('notification', {
+            'type': 'info',
+            'message': f'🌧️ Weather: {message}'
+        }, namespace='/')
+    
+    else:
+        print(f"[CENTRAL] ℹ️  WEATHER: {message}")
+    
+    return jsonify({"status": "ok", "received": True})
+
 # ==================== WEBSOCKET HANDLERS ====================
 
 @socketio.on('connect')
