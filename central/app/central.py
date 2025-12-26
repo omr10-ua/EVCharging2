@@ -95,6 +95,11 @@ def api_cp_command(cp_id):
             'type': 'warning' if not command_sent else 'info',
             'message': msg
         }, namespace='/')
+        # ✅ Emitir log
+        socketio.emit('system_log', {
+            'type': 'warning',
+            'message': f'⏸️ CP {cp_id} PARADO por comando administrativo'
+        }, namespace='/')
         print(f"[CENTRAL] CP {cp_id} PARADO por comando administrativo")
     else:
         update_cp(cp_id, state="ACTIVADO")
@@ -104,6 +109,11 @@ def api_cp_command(cp_id):
         socketio.emit('notification', {
             'type': 'warning' if not command_sent else 'success',
             'message': msg
+        }, namespace='/')
+        # ✅ Emitir log
+        socketio.emit('system_log', {
+            'type': 'success',
+            'message': f'▶️ CP {cp_id} REANUDADO por comando administrativo'
         }, namespace='/')
         print(f"[CENTRAL] CP {cp_id} REANUDADO por comando administrativo")
     
@@ -141,6 +151,11 @@ def api_weather_notify():
             'type': 'success',
             'message': f'🌤️ Weather: {message}'
         }, namespace='/')
+        # ✅ Emitir log también
+        socketio.emit('system_log', {
+            'type': 'success',
+            'message': f'🌤️ WEATHER: {message}'
+        }, namespace='/')
     
     elif msg_type == "alert":
         print(f"[CENTRAL] ⚠️  WEATHER ALERT: {message}")
@@ -149,6 +164,10 @@ def api_weather_notify():
         socketio.emit('notification', {
             'type': 'warning',
             'message': f'⚠️ Weather Alert: {message}'
+        }, namespace='/')
+        socketio.emit('system_log', {
+            'type': 'warning',
+            'message': f'⚠️ WEATHER ALERT: {message}'
         }, namespace='/')
     
     elif msg_type == "recovery":
@@ -159,18 +178,31 @@ def api_weather_notify():
             'type': 'success',
             'message': f'✅ Weather: {message}'
         }, namespace='/')
+        socketio.emit('system_log', {
+            'type': 'success',
+            'message': f'✅ WEATHER: {message}'
+        }, namespace='/')
     
     elif msg_type == "check":
-        # Checks periódicos - log silencioso en Central
+        # Checks periódicos - log en sistema pero no notificación
         if cp_id and city and temp is not None:
             temp_icon = "❄️" if temp < 0 else "🌡️"
-            print(f"[CENTRAL] {temp_icon} WEATHER: {city:15s} ({cp_id}): {temp:.1f}°C")
+            log_msg = f"{temp_icon} WEATHER: {city:15s} ({cp_id}): {temp:.1f}°C"
+            print(f"[CENTRAL] {log_msg}")
+            socketio.emit('system_log', {
+                'type': 'info',
+                'message': log_msg
+            }, namespace='/')
     
     elif msg_type == "error":
         print(f"[CENTRAL] ❌ WEATHER ERROR: {message}")
         socketio.emit('notification', {
             'type': 'error',
             'message': f'❌ Weather: {message}'
+        }, namespace='/')
+        socketio.emit('system_log', {
+            'type': 'error',
+            'message': f'❌ WEATHER ERROR: {message}'
         }, namespace='/')
     
     elif msg_type == "disconnect":
@@ -179,11 +211,66 @@ def api_weather_notify():
             'type': 'info',
             'message': f'🌧️ Weather: {message}'
         }, namespace='/')
+        socketio.emit('system_log', {
+            'type': 'info',
+            'message': f'🌧️ WEATHER: {message}'
+        }, namespace='/')
     
     else:
         print(f"[CENTRAL] ℹ️  WEATHER: {message}")
+        socketio.emit('system_log', {
+            'type': 'info',
+            'message': f'ℹ️ WEATHER: {message}'
+        }, namespace='/')
     
     return jsonify({"status": "ok", "received": True})
+
+@app.route('/api/audit_logs')
+def api_audit_logs():
+    """API: Obtiene los últimos N logs de auditoría"""
+    try:
+        limit = int(request.args.get('limit', 100))
+        
+        # Leer archivo de auditoría
+        audit_file = "/central/audit.log"
+        
+        if not os.path.exists(audit_file):
+            return jsonify([])
+        
+        with open(audit_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Tomar las últimas N líneas
+        recent_lines = lines[-limit:]
+        
+        # Parsear y devolver
+        logs = []
+        for line in recent_lines:
+            line = line.strip()
+            if line:
+                logs.append(line)
+        
+        return jsonify(logs)
+    
+    except Exception as e:
+        print(f"[API] Error leyendo audit logs: {e}")
+        return jsonify([])
+
+@app.route('/api/sessions')
+def api_sessions():
+    """API: Obtiene todas las sesiones guardadas"""
+    try:
+        data = load_data()
+        sessions = data.get("sessions", [])
+        
+        # Ordenar por fecha descendente (más recientes primero)
+        sessions_sorted = sorted(sessions, key=lambda x: x.get('end_time', ''), reverse=True)
+        
+        return jsonify(sessions_sorted)
+    
+    except Exception as e:
+        print(f"[API] Error obteniendo sesiones: {e}")
+        return jsonify([])
 
 # ==================== WEBSOCKET HANDLERS ====================
 
@@ -210,7 +297,8 @@ def handle_request_state():
 # ==================== THREADS DE SOPORTE ====================
 
 def broadcast_state_loop():
-    """Envía actualizaciones de estado cada 2 segundos a todos los clientes web"""
+    """Envía actualizaciones de estado cada 1 segundo a todos los clientes web"""
+    import eventlet
     while True:
         try:
             cps = get_all_cps()
@@ -219,10 +307,11 @@ def broadcast_state_loop():
                          namespace='/')
         except Exception as e:
             print(f"[BROADCAST] Error: {e}")
-        time.sleep(2)
+        eventlet.sleep(1)
 
 def periodic_monitor_publish(producer, interval=5):
     """Publica snapshot del sistema a Kafka periódicamente"""
+    import eventlet
     while True:
         try:
             snapshot = {
@@ -233,7 +322,7 @@ def periodic_monitor_publish(producer, interval=5):
             producer.publish_monitor(snapshot)
         except Exception as e:
             print("[MONITOR PUBLISH] error:", e)
-        time.sleep(interval)
+        eventlet.sleep(interval)  # ✅ Usar eventlet.sleep
 
 def reset_all_cps_to_disconnected():
     """Marca todos los CPs como DESCONECTADO y limpia drivers al arrancar Central"""
@@ -306,18 +395,12 @@ def main():
     kafka_consumer.start()
     print("[CENTRAL] ✅ Kafka Consumer iniciado")
     
-    # Iniciar thread de broadcast WebSocket
-    broadcast_thread = threading.Thread(target=broadcast_state_loop, daemon=True)
-    broadcast_thread.start()
+    # ✅ Iniciar broadcast WebSocket usando socketio.start_background_task
+    socketio.start_background_task(broadcast_state_loop)
     print("[CENTRAL] ✅ Broadcast WebSocket iniciado")
     
-    # Iniciar thread de publicación a Kafka
-    monitor_thread = threading.Thread(
-        target=periodic_monitor_publish, 
-        args=(kafka_producer, 4), 
-        daemon=True
-    )
-    monitor_thread.start()
+    # ✅ Iniciar thread de publicación a Kafka usando socketio.start_background_task
+    socketio.start_background_task(periodic_monitor_publish, kafka_producer, 4)
     print("[CENTRAL] ✅ Monitor Kafka iniciado")
     
     # Iniciar servidor Flask con SocketIO

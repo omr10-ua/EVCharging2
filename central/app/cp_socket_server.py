@@ -44,6 +44,11 @@ class CPSocketServer:
                     'type': msg_type,
                     'message': message
                 }, namespace='/')
+                # ✅ También emitir como system_log
+                self.socketio.emit('system_log', {
+                    'type': msg_type,
+                    'message': message
+                }, namespace='/')
             except Exception as e:
                 print(f"[CP SOCKET] Error enviando notificación web: {e}")
     

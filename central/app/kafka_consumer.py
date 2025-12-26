@@ -270,6 +270,11 @@ class KafkaCentralConsumer:
                     'type': 'success',
                     'message': f'Servicio iniciado: {driver_id} en {cp_id}'
                 }, namespace='/')
+                # ✅ Emitir log
+                self.socketio.emit('system_log', {
+                    'type': 'success',
+                    'message': f'✅ Servicio AUTORIZADO: {driver_id} → {cp_id}'
+                }, namespace='/')
         
         # Enviar respuesta al driver vía Kafka
         if self.producer:
@@ -357,10 +362,18 @@ class KafkaCentralConsumer:
                     "end_time": datetime.fromtimestamp(timestamp).isoformat(),
                     "total_kwh": round(final_kwh, 3),
                     "total_euros": round(final_euros, 2),
-                    "status": reason
+                    "reason": reason  # ✅ Corregido: era "status"
                 }
                 add_session(session)
                 print(f"[KAFKA CONSUMER] 💾 Sesión guardada: {session['session_id']}")
+                
+                # ✅ Emitir log de finalización
+                if self.socketio:
+                    reason_emoji = "✅" if reason == "completed" else "⚠️"
+                    self.socketio.emit('system_log', {
+                        'type': 'success' if reason == 'completed' else 'warning',
+                        'message': f'{reason_emoji} Suministro FINALIZADO: {driver_id} en {cp_id} - {final_kwh:.2f} kWh (€{final_euros:.2f})'
+                    }, namespace='/')
             
             # Si terminó por avería, marcar como AVERIADO
             if reason == "fault":

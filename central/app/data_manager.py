@@ -9,6 +9,40 @@ from datetime import datetime
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
 _lock = threading.Lock()
 
+def _load_data_unsafe():
+    """
+    Versión INTERNA de load_data SIN lock (ya está dentro de un lock).
+    NO llamar directamente, solo desde funciones que ya tienen _lock.
+    """
+    if not os.path.exists(DATA_FILE):
+        data = {
+            "charging_points": {}, 
+            "drivers": {}, 
+            "sessions": [],
+            "credentials": {},
+            "encryption_keys": {}
+        }
+        return data
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Asegurar que existen las claves
+            if "credentials" not in data:
+                data["credentials"] = {}
+            if "encryption_keys" not in data:
+                data["encryption_keys"] = {}
+            return data
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[DATA MANAGER] Error loading data: {e}, using empty data")
+        return {
+            "charging_points": {}, 
+            "drivers": {}, 
+            "sessions": [],
+            "credentials": {},
+            "encryption_keys": {}
+        }
+
 def load_data():
     """Carga el JSON completo (thread-safe lectura simple)."""
     if not os.path.exists(DATA_FILE):
@@ -17,33 +51,14 @@ def load_data():
             "charging_points": {}, 
             "drivers": {}, 
             "sessions": [],
-            "credentials": {},  # {cp_id: {username, password_hash}}
-            "encryption_keys": {}  # {cp_id: encryption_key}
+            "credentials": {},
+            "encryption_keys": {}
         }
         save_data(data)
         return data
 
     with _lock:
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # Asegurar que existen las nuevas claves
-                if "credentials" not in data:
-                    data["credentials"] = {}
-                if "encryption_keys" not in data:
-                    data["encryption_keys"] = {}
-                return data
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"[DATA MANAGER] Error loading data: {e}, creating new file")
-            data = {
-                "charging_points": {}, 
-                "drivers": {}, 
-                "sessions": [],
-                "credentials": {},
-                "encryption_keys": {}
-            }
-            save_data(data)
-            return data
+        return _load_data_unsafe()
 
 def save_data(data):
     """Guarda el JSON atomizando con un lock para evitar corrupciones."""
@@ -141,32 +156,34 @@ def reset_all_cps_to_disconnected():
     """
     Marca todos los CPs como DESCONECTADO al arrancar Central.
     Esto evita tener CPs fantasma en estado ACTIVADO de sesiones anteriores.
+    THREAD-SAFE con lock.
     """
-    data = load_data()
-    cps = data["charging_points"]
-    
-    if not cps:
-        print("[DATA] No hay CPs en la base de datos")
-        return 0
-    
-    count = 0
-    for cp_id, cp_data in cps.items():
-        if cp_data.get("state") != "DESCONECTADO":
-            cp_data["state"] = "DESCONECTADO"
-            cp_data["current_driver"] = None
-            cp_data["current_kw"] = 0.0
-            cp_data["total_kwh"] = 0.0
-            cp_data["current_euros"] = 0.0
-            cp_data["last_update"] = datetime.utcnow().isoformat()
-            count += 1
-    
-    if count > 0:
-        save_data(data)
-        print(f"[DATA] ✅ {count} CPs marcados como DESCONECTADO")
-    else:
-        print("[DATA] Todos los CPs ya estaban en DESCONECTADO")
-    
-    return count
+    with _lock:  # ✅ Lock global
+        data = _load_data_unsafe()  # ✅ Usar versión sin lock
+        cps = data.get("charging_points", {})
+        
+        if not cps:
+            print("[DATA] No hay CPs en la base de datos")
+            return 0
+        
+        count = 0
+        for cp_id, cp_data in cps.items():
+            if cp_data.get("state") != "DESCONECTADO":
+                cp_data["state"] = "DESCONECTADO"
+                cp_data["current_driver"] = None
+                cp_data["current_kw"] = 0.0
+                cp_data["total_kwh"] = 0.0
+                cp_data["current_euros"] = 0.0
+                cp_data["last_update"] = datetime.utcnow().isoformat()
+                count += 1
+        
+        if count > 0:
+            save_data(data)
+            print(f"[DATA] ✅ {count} CPs marcados como DESCONECTADO")
+        else:
+            print("[DATA] Todos los CPs ya estaban en DESCONECTADO")
+        
+        return count
 
 # ==================== FUNCIONES DE CREDENCIALES ====================
 

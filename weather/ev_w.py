@@ -270,36 +270,51 @@ class WeatherControlOffice:
     
     def notify_central_event(self, event_type, message, cp_id=None, city=None, temp=None, details=None):
         """
-        Notifica un evento a Central (conexión, alerta, error, etc)
+        Notifica un evento a Central vía HTTP
         event_type: 'connection', 'alert', 'recovery', 'check', 'error', 'disconnect'
+        
+        ✅ SIEMPRE muestra errores en consola (aunque no lleguen a Central)
         """
+        payload = {
+            'type': event_type,
+            'message': message
+        }
+        
+        if cp_id:
+            payload['cp_id'] = cp_id
+        if city:
+            payload['city'] = city
+        if temp is not None:
+            payload['temp'] = temp
+        if details:
+            payload['details'] = details
+        
         try:
             notify_url = self.central_url.replace('/charging_points', '/weather/notify')
-            
-            payload = {
-                'type': event_type,
-                'message': message
-            }
-            
-            if cp_id:
-                payload['cp_id'] = cp_id
-            if city:
-                payload['city'] = city
-            if temp is not None:
-                payload['temp'] = temp
-            if details:
-                payload['details'] = details
-            
             response = requests.post(notify_url, json=payload, timeout=3)
             
             if response.status_code == 200:
                 return True
             else:
-                # No loguear error aquí para evitar spam
+                # ✅ Reportar error de API (solo en consola Weather)
+                self.log(f"❌ Central API error: HTTP {response.status_code}")
                 return False
                 
-        except Exception:
-            # Silencioso - Central puede no estar disponible
+        except requests.exceptions.ConnectionError as e:
+            # ✅ Error de conexión - SIEMPRE visible en Weather
+            self.log(f"❌ No se puede conectar con Central API")
+            self.log(f"   URL: {self.central_url}")
+            self.log(f"   Error: {str(e)[:100]}")
+            return False
+            
+        except requests.exceptions.Timeout:
+            # ✅ Timeout
+            self.log(f"❌ Timeout conectando con Central API (>3s)")
+            return False
+            
+        except Exception as e:
+            # ✅ Otros errores
+            self.log(f"❌ Error notificando a Central: {type(e).__name__}: {e}")
             return False
     
     def notify_central(self, cp_id, action):
@@ -317,9 +332,15 @@ class WeatherControlOffice:
                 self.log(f"✓ Central notificada: {cp_id} → {action.upper()}")
                 return True
             else:
-                self.log(f"✗ Error notificando Central ({cp_id}): {response.status_code}")
+                self.log(f"✗ Error notificando Central ({cp_id}): HTTP {response.status_code}")
                 return False
                 
+        except requests.exceptions.ConnectionError as e:
+            self.log(f"❌ No se puede conectar con Central ({url}): {e}")
+            return False
+        except requests.exceptions.Timeout:
+            self.log(f"❌ Timeout conectando con Central ({url})")
+            return False
         except Exception as e:
             self.log(f"✗ Error notificando Central: {e}")
             return False
@@ -336,6 +357,17 @@ class WeatherControlOffice:
             weather = self.get_weather(city)
             
             if not weather['success']:
+                # ✅ NOTIFICAR ERROR A CENTRAL
+                error_detail = weather.get('error', 'unknown')
+                error_msg = f"Error consultando clima de {city} (CP {cp_id}): {error_detail}"
+                
+                self.notify_central_event(
+                    event_type='error',
+                    message=error_msg,
+                    cp_id=cp_id,
+                    city=city,
+                    details={'error': error_detail}
+                )
                 continue
             
             temp = weather['temp']
@@ -396,7 +428,9 @@ class WeatherControlOffice:
         self.log("Iniciando loop de monitorización...")
         
         check_count = 0
-        reload_interval = 5 // self.check_interval  # Recargar cada ~30 segundos
+        reload_interval = 5 // self.check_interval  # ✅ Recargar cada ~5 segundos (muy responsive)
+        if reload_interval < 1:
+            reload_interval = 1  # Mínimo cada check
         
         while self.running:
             try:
