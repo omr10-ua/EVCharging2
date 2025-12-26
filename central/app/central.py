@@ -9,11 +9,12 @@ from .kafka_producer import KafkaCentralProducer
 from .kafka_consumer import KafkaCentralConsumer
 from .data_manager import load_data, save_data, get_all_cps, get_cp, update_cp
 from .registry import registry_bp
-from .crypto_manager import CryptoManager      # ✅ AÑADIDO
-from .audit_logger import AuditLogger          # ✅ AÑADIDO
+from .crypto_manager import CryptoManager
+from .audit_logger import AuditLogger
 
 # Crear aplicación Flask con SocketIO
 app = Flask(__name__)
+# ✅ Clave secreta generada aleatoriamente (24 bytes = 48 caracteres hex)
 app.config['SECRET_KEY'] = os.urandom(24).hex()
 
 socketio = SocketIO(
@@ -24,14 +25,12 @@ socketio = SocketIO(
     engineio_logger=False
 )
 
-# Registrar Registry Blueprint
+# ✅ REGISTRAR REGISTRY BLUEPRINT
 app.register_blueprint(registry_bp)
 
 # Variable global para el producer y consumer
 kafka_producer = None
-kafka_consumer = None
-crypto_manager = None    # ✅ AÑADIDO
-audit_logger = None      # ✅ AÑADIDO
+kafka_consumer = None  # ✅ NUEVO
 
 # ==================== RUTAS WEB ====================
 
@@ -69,7 +68,7 @@ def api_cp_command(cp_id):
     if not cp:
         return jsonify({"error": "CP not found"}), 404
 
-    # Enviar comando al CP real
+    # ✅ Enviar comando al CP real
     command_sent = False
     if hasattr(app, 'cp_server'):
         command = {
@@ -79,14 +78,15 @@ def api_cp_command(cp_id):
         }
         command_sent = app.cp_server.send_command_to_cp(cp_id, command)
     
-    # ✅ AÑADIDO: Auditar comando
-    if audit_logger:
-        client_ip = request.remote_addr or 'unknown'
-        status = 'sent' if command_sent else 'not_sent'
-        audit_logger.log_command(cp_id, action, status, client_ip, 0)
-    
     # Actualizar estado en BD
     if action == "stop":
+        # Notificar al driver si hay uno activo
+        if cp.get('current_driver') and hasattr(app, 'cp_server'):
+            try:
+                app.cp_server._notify_driver_cancel(cp_id, "Parada administrativa")
+            except:
+                pass
+        
         update_cp(cp_id, state="PARADO")
         msg = f'CP {cp_id} ha sido PARADO'
         if not command_sent:
@@ -165,22 +165,29 @@ def periodic_monitor_publish(producer, interval=5):
         time.sleep(interval)
 
 def reset_all_cps_to_disconnected():
-    """Marca todos los CPs como DESCONECTADO al arrancar Central"""
+    """Marca todos los CPs como DESCONECTADO y limpia drivers al arrancar Central"""
     data = load_data()
     cps = data.get("charging_points", {})
     
     if cps:
-        print(f"[CENTRAL] 📝 Marcando {len(cps)} CPs como DESCONECTADO...")
+        print(f"[CENTRAL] 📝 Reseteando {len(cps)} CPs a estado inicial...")
         for cp_id in cps:
-            update_cp(cp_id, state="DESCONECTADO")
-        print(f"[CENTRAL] ✅ {len(cps)} CPs marcados como DESCONECTADO")
+            update_cp(
+                cp_id, 
+                state="DESCONECTADO",
+                current_driver=None,
+                current_kw=0.0,
+                total_kwh=0.0,
+                current_euros=0.0
+            )
+        print(f"[CENTRAL] ✅ {len(cps)} CPs limpiados (DESCONECTADO, sin drivers)")
     else:
         print("[CENTRAL] ℹ️  No hay CPs previos registrados")
 
 # ==================== FUNCIÓN PRINCIPAL ====================
 
 def main():
-    global kafka_producer, kafka_consumer, crypto_manager, audit_logger  # ✅ MODIFICADO
+    global kafka_producer, kafka_consumer
     
     # Configuración vía variables de entorno
     kafka_host = os.environ.get("KAFKA_HOST", "kafka")
@@ -196,20 +203,15 @@ def main():
     print(f"[CENTRAL] 🌐 Web Panel: http://0.0.0.0:{api_port}")
     print("="*60)
     
-    # ✅ AÑADIDO: Inicializar sistemas de seguridad
-    print("[CENTRAL] 🔐 Inicializando CryptoManager...")
-    crypto_manager = CryptoManager()
-    print(f"[CENTRAL] ✅ CryptoManager listo ({len(crypto_manager.keys)} claves cargadas)")
-    
-    print("[CENTRAL] 📋 Inicializando AuditLogger...")
-    audit_logger = AuditLogger()
-    print("[CENTRAL] ✅ AuditLogger listo")
-    
-    # Marcar todos los CPs como DESCONECTADO al arrancar
+    # ✅ NUEVO: Marcar todos los CPs como DESCONECTADO al arrancar
     reset_all_cps_to_disconnected()
     
     # Inicializar Kafka Producer
     kafka_producer = KafkaCentralProducer()
+    
+    # ✅ Inicializar CryptoManager y AuditLogger
+    crypto_manager = CryptoManager()
+    audit_logger = AuditLogger()
     
     # Iniciar servidor de sockets para CPs (ANTES del consumer)
     cp_server = CPSocketServer(
@@ -217,18 +219,18 @@ def main():
         port=cp_port, 
         producer=kafka_producer,
         socketio=socketio,
-        crypto_manager=crypto_manager,  # ✅ AÑADIDO
-        audit_logger=audit_logger        # ✅ AÑADIDO
+        crypto_manager=crypto_manager,
+        audit_logger=audit_logger
     )
     cp_server.start()
-    app.cp_server = cp_server
+    app.cp_server = cp_server  # Guardar referencia
     print(f"[CENTRAL] ✅ Socket server iniciado en puerto {cp_port}")
     
-    # Inicializar Kafka Consumer con socketio Y cp_server
+    # ✅ Inicializar Kafka Consumer con socketio Y cp_server
     kafka_consumer = KafkaCentralConsumer(
         producer=kafka_producer, 
         socketio=socketio,
-        cp_server=cp_server
+        cp_server=cp_server  # ✅ Pasar referencia
     )
     kafka_consumer.start()
     print("[CENTRAL] ✅ Kafka Consumer iniciado")
@@ -265,7 +267,7 @@ def main():
         print("\n[CENTRAL] ⚠️  Señal de interrupción recibida")
         print("[CENTRAL] 🛑 Cerrando servidor...")
         cp_server.stop()
-        kafka_consumer.stop()
+        kafka_consumer.stop()  # ✅ NUEVO
         kafka_producer.flush()
         print("[CENTRAL] ✅ Central finalizada correctamente")
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-EV_Driver - Aplicación del conductor (MEJORADA)
+EV_Driver - Aplicación del conductor (MEJORADA v3)
 Funciones:
 - Solicita suministro en un CP específico
 - Muestra telemetría en TIEMPO REAL durante el suministro
 - Muestra ticket final al completar
 - Puede leer peticiones desde un archivo
 - Recibe updates vía Kafka de CENTRAL
+- NUEVO: Detecta si CP se avería/desconecta durante suministro
 """
 
 import os
@@ -27,13 +28,15 @@ class EVDriver:
         self.driver_id = driver_id
         self.kafka_broker = kafka_broker
         self.producer = None
-        self.consumer_updates = None  # Consumer para driver_updates
-        self.consumer_telemetry = None  # Consumer para cp_telemetry
+        self.consumer_updates = None
+        self.consumer_telemetry = None
         self.running = True
         self.pending_requests = []
         self.current_cp = None
         self.current_price = 0.0
         self.supply_start_time = None
+        self.waiting_response = False  # Flag para timeout
+        self.response_received = threading.Event()  # Event para sincronizar
         
     def log(self, msg):
         """Logging con timestamp"""
@@ -41,47 +44,54 @@ class EVDriver:
         print(f'[{timestamp}] [DRIVER-{self.driver_id}] {msg}')
     
     def init_kafka(self):
-        """Inicializa Kafka"""
-        try:
-            self.log(f"Conectando a Kafka en {self.kafka_broker}...")
-            
-            # Producer para enviar peticiones
-            self.producer = KafkaProducer(
-                bootstrap_servers=self.kafka_broker,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                retries=5
-            )
-            
-            # Consumer para recibir respuestas de CENTRAL (autorizaciones/denegaciones)
-            self.consumer_updates = KafkaConsumer(
-                'driver_updates',
-                bootstrap_servers=self.kafka_broker,
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                group_id=f'driver_{self.driver_id}_updates',
-                auto_offset_reset='latest',
-                enable_auto_commit=True,
-                consumer_timeout_ms=1000
-            )
-            
-            # Consumer para recibir telemetría de CPs (suministro en tiempo real)
-            # IMPORTANTE: Usamos group_id aleatorio para siempre leer mensajes recientes
-            self.consumer_telemetry = KafkaConsumer(
-                'cp_telemetry',
-                bootstrap_servers=self.kafka_broker,
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                group_id=f'driver_{self.driver_id}_telemetry_{uuid.uuid4().hex[:8]}',
-                auto_offset_reset='latest',
-                enable_auto_commit=False,  # No guardar offset
-                consumer_timeout_ms=1000
-            )
-            
-            self.log("✓ Kafka inicializado")
-            self.log("✓ Escuchando: driver_updates, cp_telemetry")
-            return True
-            
-        except Exception as e:
-            self.log(f"✗ Error inicializando Kafka: {e}")
-            return False
+        """Inicializa Kafka con reintentos"""
+        max_retries = 10
+        
+        for attempt in range(max_retries):
+            try:
+                self.log(f"Conectando a Kafka en {self.kafka_broker}... (intento {attempt+1}/{max_retries})")
+                
+                # Producer para enviar peticiones
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_broker,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                    retries=5,
+                    max_block_ms=5000
+                )
+                
+                # Consumer para recibir respuestas de CENTRAL
+                self.consumer_updates = KafkaConsumer(
+                    'driver_updates',
+                    bootstrap_servers=self.kafka_broker,
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    group_id=f'driver_{self.driver_id}_updates',
+                    auto_offset_reset='latest',
+                    enable_auto_commit=True,
+                    consumer_timeout_ms=1000
+                )
+                
+                # Consumer para recibir telemetría de CPs
+                self.consumer_telemetry = KafkaConsumer(
+                    'cp_telemetry',
+                    bootstrap_servers=self.kafka_broker,
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    group_id=f'driver_{self.driver_id}_telemetry_{uuid.uuid4().hex[:8]}',
+                    auto_offset_reset='latest',
+                    enable_auto_commit=False,
+                    consumer_timeout_ms=1000
+                )
+                
+                self.log("✓ Kafka inicializado correctamente")
+                self.log("✓ Escuchando: driver_updates, cp_telemetry")
+                return True
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.log(f"✗ Error conectando (intento {attempt+1}): {e}")
+                    time.sleep(2)
+                else:
+                    self.log(f"✗ Error fatal inicializando Kafka después de {max_retries} intentos: {e}")
+                    return False
     
     def request_charging(self, cp_id):
         """Solicita un suministro en un CP"""
@@ -95,21 +105,75 @@ class EVDriver:
         }
         
         try:
+            # Resetear event y flag
+            self.response_received.clear()
+            self.waiting_response = True
+            
             self.producer.send('driver_requests', request)
             self.producer.flush()
             self.log(f"✓ Petición enviada para CP {cp_id}")
+            
+            # ✅ Esperar respuesta con timeout de 10 segundos
+            self.log("⏳ Esperando respuesta de Central...")
+            received = self.response_received.wait(timeout=10)
+            
+            if not received:
+                print("\n")
+                self.log("="*60)
+                self.log("⚠️  TIMEOUT: Central no respondió en 10 segundos")
+                self.log("   Posibles causas:")
+                self.log("   - Central está apagado")
+                self.log("   - Kafka no funciona correctamente")
+                self.log("   - Red desconectada")
+                self.log("="*60)
+                print()
+                return False
+            
             return True
+            
         except Exception as e:
             self.log(f"✗ Error enviando petición: {e}")
             return False
+        finally:
+            self.waiting_response = False
     
     def consumer_updates_loop(self):
         """Loop que consume respuestas de autorización/denegación"""
         self.log("Iniciando consumer updates loop...")
         
+        if not self.consumer_updates:
+            self.log("✗ Consumer updates no inicializado")
+            return
+        
+        kafka_failures = 0
+        kafka_down_alerted = False  # Flag para no spamear
+        
         try:
             while self.running:
-                messages = self.consumer_updates.poll(timeout_ms=1000)
+                try:
+                    messages = self.consumer_updates.poll(timeout_ms=1000)
+                    kafka_failures = 0  # Reset si funciona
+                    if kafka_down_alerted:
+                        self.log("✅ Kafka reconectado - Sistema operativo")
+                        kafka_down_alerted = False
+                    
+                except Exception as e:
+                    kafka_failures += 1
+                    if kafka_failures == 1:
+                        self.log(f"⚠️  Error Kafka consumer_updates: {e}")
+                    
+                    if kafka_failures >= 5 and not kafka_down_alerted:
+                        print("\n\n")
+                        print("="*60)
+                        print("⚠️  ALERTA: KAFKA NO RESPONDE")
+                        print("="*60)
+                        self.log("🔴 Sistema de notificaciones DESCONECTADO")
+                        self.log("⚠️  No se pueden recibir respuestas de Central")
+                        self.log("⚠️  No podrá solicitar nuevos servicios hasta reconexión")
+                        print("="*60)
+                        print()
+                        kafka_down_alerted = True
+                    continue
                 
                 for topic_partition, records in messages.items():
                     for record in records:
@@ -121,7 +185,7 @@ class EVDriver:
                             driver_id = data.get('driver_id')
                             
                             if driver_id != self.driver_id:
-                                continue  # No es para nosotros
+                                continue
                             
                             payload = data.get('payload', {})
                             msg_type = payload.get('type')
@@ -133,7 +197,10 @@ class EVDriver:
                                 self.current_price = price
                                 self.supply_start_time = time.time()
                                 
-                                print()  # Nueva línea
+                                # ✅ Señalizar que llegó respuesta
+                                self.response_received.set()
+                                
+                                print()
                                 self.log("="*60)
                                 self.log("✅ SUMINISTRO AUTORIZADO")
                                 self.log(f"   CP: {cp_id}")
@@ -145,7 +212,11 @@ class EVDriver:
                             elif msg_type == 'charging_denied':
                                 cp_id = payload.get('cp_id')
                                 reason = payload.get('reason', 'Desconocido')
-                                print()  # Nueva línea
+                                
+                                # ✅ Señalizar que llegó respuesta
+                                self.response_received.set()
+                                
+                                print()
                                 self.log("="*60)
                                 self.log("❌ SUMINISTRO DENEGADO")
                                 self.log(f"   CP: {cp_id}")
@@ -153,6 +224,25 @@ class EVDriver:
                                 self.log("="*60)
                                 print()
                                 self.current_cp = None
+                            
+                            elif msg_type == 'supply_cancelled':
+                                cp_id = payload.get('cp_id')
+                                reason = payload.get('reason', 'Unknown')
+                                
+                                # Solo procesar si es nuestro CP actual
+                                if cp_id == self.current_cp:
+                                    print("\n\n")
+                                    self.log("="*60)
+                                    self.log("🛑 SUMINISTRO CANCELADO POR CENTRAL")
+                                    self.log(f"   Razón: {reason}")
+                                    self.log("   Esperando ticket final...")
+                                    self.log("="*60)
+                                    print()
+                                    
+                                    # ✅ Resetear estado inmediatamente
+                                    self.current_cp = None
+                                    self.current_price = 0.0
+                                    self.supply_start_time = None
                         
                         except Exception as e:
                             self.log(f"Error procesando mensaje updates: {e}")
@@ -166,14 +256,82 @@ class EVDriver:
         """Loop que consume telemetría en tiempo real"""
         self.log("Iniciando consumer telemetry loop...")
         
+        if not self.consumer_telemetry:
+            self.log("✗ Consumer telemetry no inicializado")
+            return
+        
         last_print = 0
+        last_telemetry = None  # Watchdog - None = desactivado hasta primer mensaje
+        kafka_failures = 0
         
         try:
             while self.running:
-                # Poll con timeout más corto para capturar mensajes más rápido
-                messages = self.consumer_telemetry.poll(timeout_ms=500)
+                try:
+                    messages = self.consumer_telemetry.poll(timeout_ms=500)
+                    kafka_failures = 0  # Reset si funciona
+                    
+                except Exception as e:
+                    kafka_failures += 1
+                    if kafka_failures == 1:
+                        self.log(f"⚠️  Error Kafka consumer_telemetry: {e}")
+                    if kafka_failures >= 5:
+                        self.log("🔴 KAFKA NO RESPONDE - Sin telemetría")
+                        
+                        # Abortar suministro si estábamos recibiendo
+                        if self.current_cp:
+                            saved_cp = self.current_cp
+                            saved_kwh = 0.0  # No sabemos cuánto llevaba
+                            
+                            print("\n\n")
+                            print("="*60)
+                            print("⚠️  ALERTA: PÉRDIDA DE CONEXIÓN CON CENTRAL")
+                            print("="*60)
+                            self.log(f"🔴 Suministro en {saved_cp} ABORTADO por fallo Kafka")
+                            self.log("⚠️  No se puede confirmar estado final del suministro")
+                            self.log("⚠️  Contacte con el operador para verificar cargo")
+                            print("="*60)
+                            print()
+                            
+                            # Intentar enviar cancelación (probablemente falle)
+                            try:
+                                cancel_msg = {
+                                    "type": "cancel_supply",
+                                    "driver_id": self.driver_id,
+                                    "cp_id": saved_cp,
+                                    "reason": "kafka_driver_lost"
+                                }
+                                self.producer.send('driver_requests', cancel_msg)
+                                self.producer.flush(timeout=2)
+                            except:
+                                pass  # Esperado que falle
+                            
+                            # Resetear estado local
+                            self.current_cp = None
+                            self.current_price = 0.0
+                            self.supply_start_time = None
+                            last_telemetry = None  # Reset watchdog
+                    continue
                 
                 if not messages:
+                    # ✅ WATCHDOG: Si estamos suministrando y no recibimos telemetría en 5 seg
+                    # last_telemetry será None hasta que llegue el primer mensaje
+                    if self.current_cp and self.supply_start_time and last_telemetry is not None:
+                        silence_duration = time.time() - last_telemetry
+                        if silence_duration > 5:  # 5 segundos
+                            print("\n\n")
+                            print("="*60)
+                            print("⚠️  ALERTA: SIN TELEMETRÍA > 5 SEGUNDOS")
+                            print("="*60)
+                            self.log(f"🔴 Suministro en {self.current_cp} ABORTADO (sin datos)")
+                            self.log("⚠️  Central/CP no responde - Verificar conexión")
+                            print("="*60)
+                            print()
+                            
+                            self.current_cp = None
+                            self.current_price = 0.0
+                            self.supply_start_time = None
+                            last_telemetry = None  # Reset watchdog
+                    
                     continue
                 
                 for topic_partition, records in messages.items():
@@ -187,21 +345,24 @@ class EVDriver:
                             cp_id = data.get('cp_id')
                             driver_id = data.get('driver_id')
                             
-                            # Solo procesar mensajes del CP donde estamos
-                            if cp_id != self.current_cp:
-                                continue
-                            
-                            # Solo procesar mensajes para nosotros (si tiene driver_id)
+                            # Solo procesar mensajes para nosotros
                             if driver_id and driver_id != self.driver_id:
                                 continue
                             
+                            # Para telemetría y supply_start: solo si es el CP actual
+                            if msg_type in ['telemetry', 'supply_start'] and cp_id != self.current_cp:
+                                continue
+                            
+                            # supply_end (ticket): SIEMPRE procesarlo si es para nosotros
+                            
                             if msg_type == 'supply_start':
-                                print()  # Nueva línea
+                                last_telemetry = time.time()  # Reset watchdog
+                                print()
                                 self.log("🔋 SUMINISTRO INICIADO - Esperando telemetría...")
                                 print()
                             
                             elif msg_type == 'telemetry':
-                                # Mostrar telemetría cada 2 segundos (no saturar pantalla)
+                                last_telemetry = time.time()  # Reset watchdog
                                 now = time.time()
                                 if now - last_print >= 2.0:
                                     is_supplying = data.get('is_supplying', False)
@@ -211,7 +372,6 @@ class EVDriver:
                                         price = data.get('current_price', self.current_price)
                                         euros = kwh * price
                                         
-                                        # Calcular tiempo transcurrido
                                         if self.supply_start_time:
                                             elapsed = int(now - self.supply_start_time)
                                             mins = elapsed // 60
@@ -225,11 +385,12 @@ class EVDriver:
                             
                             elif msg_type == 'supply_end':
                                 # TICKET FINAL
+                                last_telemetry = time.time()  # Reset watchdog
+                                
                                 total_kwh = data.get('total_kwh', 0.0)
                                 total_euros = data.get('total_euros', 0.0)
                                 reason = data.get('reason', 'completed')
                                 
-                                # Calcular duración
                                 if self.supply_start_time:
                                     duration = int(time.time() - self.supply_start_time)
                                     mins = duration // 60
@@ -238,7 +399,7 @@ class EVDriver:
                                     mins, secs = 0, 0
                                 
                                 # Imprimir ticket
-                                print("\n\n")  # Dos nuevas líneas después de telemetría
+                                print("\n\n")
                                 print("="*60)
                                 print("🧾 TICKET DE RECARGA")
                                 print("="*60)
@@ -252,9 +413,15 @@ class EVDriver:
                                 elif reason == 'driver_disconnected':
                                     print("Estado:           🛑 CANCELADO (Desconexión)")
                                 elif reason == 'fault':
-                                    print("Estado:           ⚠️  INTERRUMPIDO (Avería)")
+                                    print("Estado:           ⚠️  INTERRUMPIDO (Avería CP)")
                                 elif reason == 'admin':
                                     print("Estado:           🛑 CANCELADO (Administrativo)")
+                                elif reason == 'cp_disconnected':
+                                    print("Estado:           🔴 INTERRUMPIDO (CP Desconectado)")
+                                elif reason == 'engine_shutdown':
+                                    print("Estado:           🔴 INTERRUMPIDO (Engine desconectado)")
+                                elif reason == 'kafka_disconnected':
+                                    print("Estado:           🔴 INTERRUMPIDO (Central desconectado)")
                                 else:
                                     print(f"Estado:           ⚠️  FINALIZADO ({reason})")
                                 
@@ -321,7 +488,6 @@ class EVDriver:
         
         while self.running:
             try:
-                # Mostrar prompt
                 if self.current_cp:
                     prompt = f"{self.driver_id} [🔋 {self.current_cp}]> "
                 else:
@@ -347,7 +513,6 @@ class EVDriver:
                 elif action == 'f' and len(parts) >= 2:
                     filename = parts[1]
                     if self.load_requests_from_file(filename):
-                        # Procesar en un hilo separado
                         t = threading.Thread(target=self.process_requests_from_file, daemon=True)
                         t.start()
                 
@@ -378,15 +543,27 @@ class EVDriver:
             self.log("Error inicializando Kafka, saliendo...")
             return
         
-        # Iniciar consumer threads
+        # Esperar a que Kafka esté completamente listo
+        self.log("Esperando estabilización de Kafka...")
+        time.sleep(3)  # ✅ Aumentado a 3 segundos
+        
+        # Verificar que los consumers están listos
+        if not self.consumer_updates or not self.consumer_telemetry:
+            self.log("✗ Consumers no inicializados correctamente")
+            return
+        
+        # Iniciar threads
         t1 = threading.Thread(target=self.consumer_updates_loop, daemon=True)
         t1.start()
         
         t2 = threading.Thread(target=self.consumer_telemetry_loop, daemon=True)
         t2.start()
         
-        # Dar tiempo a que los consumers se inicien
-        time.sleep(2)
+        # Dar tiempo a que se inicien los threads
+        self.log("Iniciando threads de consumo...")
+        time.sleep(3)  # ✅ Aumentado a 3 segundos
+        
+        self.log("✅ Sistema listo")
         
         # Modo interactivo
         self.interactive_mode()

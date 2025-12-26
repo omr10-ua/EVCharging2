@@ -132,6 +132,17 @@ class CPEngine:
                     self.stop_supply(reason)
                     conn.sendall(b'{"status":"ok"}\n')
                 
+                elif cmd_type == 'get_status':
+                    # ✅ NUEVO: Devolver estado completo
+                    status_info = {
+                        "status": "ok",
+                        "health": self.status,
+                        "is_supplying": self.is_supplying,
+                        "current_driver": self.current_driver,
+                        "total_kwh": round(self.total_kwh, 3) if self.is_supplying else 0.0
+                    }
+                    conn.sendall((json.dumps(status_info) + '\n').encode())
+                
                 else:
                     conn.sendall(b'{"status":"unknown_command"}\n')
                     
@@ -165,10 +176,11 @@ class CPEngine:
             "timestamp": self.supply_start_time
         }
         
-        # Enviar a Kafka (sin cifrar - Kafka es opcional)
+        # Enviar a Kafka con confirmación
         try:
-            self.producer.send('cp_telemetry', start_msg)
-            self.log(f"✓ Mensaje supply_start enviado a Kafka")
+            future = self.producer.send('cp_telemetry', start_msg)
+            self.producer.flush(timeout=3)  # Forzar envío inmediato
+            self.log(f"✓ Mensaje supply_start enviado y confirmado")
         except Exception as e:
             self.log(f"✗ Error enviando supply_start: {e}")
     
@@ -183,7 +195,14 @@ class CPEngine:
         
         self.log(f"✓ FINALIZANDO SUMINISTRO ({reason}) - Total: {final_kwh:.2f} kWh - Importe: €{final_euros:.2f}")
         
-        # Enviar mensaje de supply_end a Kafka
+        # ✅ PRIMERO: Limpiar estado LOCAL (siempre)
+        self.is_supplying = False
+        self.current_driver = None
+        self.consumption_kw = 0.0
+        self.total_kwh = 0.0
+        self.supply_start_time = None
+        
+        # DESPUÉS: Intentar enviar mensaje a Kafka
         end_msg = {
             "type": "supply_end",
             "cp_id": self.cp_id,
@@ -194,22 +213,40 @@ class CPEngine:
             "timestamp": time.time()
         }
         
-        # Enviar a Kafka
+        # Enviar a Kafka con confirmación
         try:
-            self.producer.send('cp_telemetry', end_msg)
-            self.log(f"✓ Mensaje supply_end enviado a Kafka")
+            future = self.producer.send('cp_telemetry', end_msg)
+            self.producer.flush(timeout=5)  # Forzar envío inmediato
+            self.log(f"✓ Mensaje supply_end enviado y confirmado")
         except Exception as e:
             self.log(f"✗ Error enviando supply_end: {e}")
+            self.log(f"⚠️  TICKET NO ENVIADO - Driver no recibirá notificación")
         
-        self.is_supplying = False
-        self.current_driver = None
-        self.consumption_kw = 0.0
-        self.total_kwh = 0.0
-        self.supply_start_time = None
+        # ✅ IMPORTANTE: Enviar telemetría de limpieza a Central
+        # Para que Central limpie current_driver y libere el CP
+        cleanup_telemetry = {
+            "type": "telemetry",
+            "cp_id": self.cp_id,
+            "is_supplying": False,
+            "consumption_kw": 0.0,
+            "total_kwh": 0.0,
+            "current_price": self.price,
+            "driver_id": None
+        }
+        
+        try:
+            self.producer.send('cp_telemetry', cleanup_telemetry)
+            self.producer.flush(timeout=3)
+            self.log(f"✓ Estado de limpieza enviado a Central")
+        except Exception as e:
+            self.log(f"⚠️  No se pudo notificar limpieza a Central: {e}")
     
     def telemetry_loop(self):
         """Loop que envía telemetría cada segundo"""
         self.log("Iniciando telemetry loop...")
+        
+        kafka_failures = 0  # Contador de fallos consecutivos
+        max_kafka_failures = 3  # Máximo de fallos antes de abortar
         
         while self.running:
             try:
@@ -229,7 +266,19 @@ class CPEngine:
                         "driver_id": self.current_driver
                     }
                     
-                    self.producer.send('cp_telemetry', telemetry)
+                    try:
+                        # Enviar y esperar confirmación
+                        future = self.producer.send('cp_telemetry', telemetry)
+                        future.get(timeout=2)  # Bloquear hasta confirmar
+                        kafka_failures = 0  # Reset contador si éxito
+                    except Exception as e:
+                        kafka_failures += 1
+                        self.log(f"⚠️  Error Kafka ({kafka_failures}/{max_kafka_failures}): {e}")
+                        
+                        if kafka_failures >= max_kafka_failures:
+                            self.log("🔴 KAFKA NO RESPONDE - Abortando suministro")
+                            self.stop_supply(reason='kafka_disconnected')
+                            continue
                     
                     # Log cada 5 segundos
                     if int(time.time()) % 5 == 0:
@@ -259,7 +308,7 @@ class CPEngine:
                     self.status = 'KO' if self.status == 'OK' else 'OK'
                     self.log(f"Estado cambiado a: {self.status}")
                     if self.status == 'KO' and self.is_supplying:
-                        self.stop_supply()
+                        self.stop_supply(reason='fault')
                 
                 elif cmd == 'p':
                     if not self.is_supplying:
@@ -309,6 +358,12 @@ class CPEngine:
         
         # Cleanup
         self.log("Limpiando recursos...")
+        
+        # ✅ Si había suministro activo, enviar ticket final
+        if self.is_supplying and self.current_driver:
+            self.log("⚠️  Enviando ticket final por cierre del Engine...")
+            self.stop_supply(reason='engine_shutdown')
+        
         if self.producer:
             self.producer.flush()
             self.producer.close()

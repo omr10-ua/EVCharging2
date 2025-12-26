@@ -60,8 +60,9 @@ class KafkaCentralConsumer:
         bs = _make_bootstrap()
         self.producer = producer
         self.socketio = socketio
-        self.cp_server = cp_server  # ✅ Referencia directa al socket server de CPs
+        self.cp_server = cp_server
         self._stop_flag = threading.Event()
+        self._startup_time = time.time()  # ✅ Timestamp de arranque
         
         # Topics
         self.topic_driver_requests = os.environ.get("KAFKA_TOPIC_DRIVER_REQ", "driver_requests")
@@ -74,11 +75,13 @@ class KafkaCentralConsumer:
                 bootstrap_servers=bs,
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 group_id='central_consumer_group',
-                auto_offset_reset='latest',
+                auto_offset_reset='latest',  # ✅ Solo mensajes nuevos de topics sin offset
                 enable_auto_commit=True
             )
             print(f"[KAFKA CONSUMER] Conectado a {bs}")
             print(f"[KAFKA CONSUMER] Escuchando topics: {self.topic_driver_requests}, {self.topic_cp_telemetry}")
+            print(f"[KAFKA CONSUMER] ⏰ Startup time: {self._startup_time}")
+            
         except Exception as e:
             print(f"[KAFKA CONSUMER] ERROR al inicializar: {e}")
             self.consumer = None
@@ -101,19 +104,48 @@ class KafkaCentralConsumer:
     
     def _consume_loop(self):
         """Loop principal que consume mensajes"""
+        print("[KAFKA CONSUMER] 📡 Iniciando loop de consumo...")
+        print("[KAFKA CONSUMER] 👂 Esperando mensajes...")
+        
         try:
+            message_count = 0
+            ignored_old = 0
+            
             for message in self.consumer:
+                message_count += 1
+                
                 if self._stop_flag.is_set():
                     break
                 
                 try:
+                    # ✅ Filtrar mensajes anteriores al arranque de Central
+                    msg_timestamp = message.value.get('timestamp', 0)
+                    if msg_timestamp > 0 and msg_timestamp < self._startup_time:
+                        ignored_old += 1
+                        if ignored_old == 1:  # Log solo el primero
+                            age = self._startup_time - msg_timestamp
+                            msg_type = message.value.get('type', 'unknown')
+                            print(f"[KAFKA CONSUMER] 🕐 Filtrando mensajes anteriores al arranque")
+                            print(f"[KAFKA CONSUMER]    Primero: {msg_type} de hace {age:.0f}s")
+                        if ignored_old == 10 or ignored_old == 50:  # Log en hitos
+                            print(f"[KAFKA CONSUMER] 🕐 Filtrados {ignored_old} mensajes viejos...")
+                        continue
+                    
                     self._process_message(message)
+                    
+                    if message_count % 50 == 0:
+                        print(f"[KAFKA CONSUMER] 📊 Procesados {message_count} mensajes ({ignored_old} viejos ignorados)")
+                    
                 except Exception as e:
                     print(f"[KAFKA CONSUMER] Error procesando mensaje: {e}")
+                    
         except Exception as e:
             print(f"[KAFKA CONSUMER] Error en consume loop: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
-            print("[KAFKA CONSUMER] Loop finalizado")
+            print(f"[KAFKA CONSUMER] Loop finalizado ({message_count} procesados, {ignored_old} ignorados)")
+
     
     def _process_message(self, message):
         """Procesa un mensaje recibido"""
@@ -149,6 +181,7 @@ class KafkaCentralConsumer:
         
         # Procesar según topic
         if topic == self.topic_driver_requests:
+            print(f"[KAFKA CONSUMER] 🚗 Petición de driver recibida: {data.get('driver_id')} → {data.get('cp_id')}")
             self._handle_driver_request(data)
         elif topic == self.topic_cp_telemetry:
             self._handle_cp_telemetry(data)
@@ -245,19 +278,15 @@ class KafkaCentralConsumer:
     def _handle_cp_telemetry(self, data):
         """
         Maneja telemetría de CPs
-        Formato esperado:
-        {
-            "type": "telemetry" | "supply_start" | "supply_end",
-            "cp_id": "CP001",
-            "is_supplying": true,
-            "consumption_kw": 22.5,
-            "total_kwh": 15.3,
-            "driver_id": "DRV001",
-            ...
-        }
         """
         cp_id = data.get("cp_id")
         msg_type = data.get("type", "telemetry")
+        
+        # ✅ DEBUG TEMPORAL
+        msg_timestamp = data.get("timestamp", 0)
+        if msg_timestamp > 0:
+            age = time.time() - msg_timestamp
+            print(f"[DEBUG] Procesando {msg_type} de {cp_id}: age={age:.1f}s")
         
         if not cp_id:
             return
@@ -284,6 +313,15 @@ class KafkaCentralConsumer:
         if msg_type == "supply_start":
             # Inicio de suministro
             driver_id = data.get("driver_id")
+            msg_timestamp = data.get("timestamp", 0)
+            
+            # ✅ VALIDACIÓN ADICIONAL: supply_start debe ser reciente (< 10 segundos)
+            if msg_timestamp > 0:
+                age = time.time() - msg_timestamp
+                if age > 10:
+                    print(f"[KAFKA CONSUMER] 🕐 Ignorando supply_start viejo de {cp_id} ({age:.0f}s)")
+                    return
+            
             print(f"[KAFKA CONSUMER] 🔋 CP {cp_id} inicia suministro para {driver_id}")
             update_cp(cp_id, 
                      state="SUMINISTRANDO", 
@@ -299,6 +337,12 @@ class KafkaCentralConsumer:
             reason = data.get("reason", "completed")
             driver_id = data.get("driver_id")
             timestamp = data.get("timestamp", time.time())
+            
+            # ✅ VALIDACIÓN: supply_end debe ser reciente (< 30 segundos)
+            age = time.time() - timestamp
+            if age > 30:
+                print(f"[KAFKA CONSUMER] 🕐 Ignorando supply_end viejo de {cp_id} ({age:.0f}s)")
+                return
             
             print(f"[KAFKA CONSUMER] ✅ CP {cp_id} finaliza suministro: {final_kwh:.2f} kWh, €{final_euros:.2f} ({reason})")
             
@@ -337,6 +381,15 @@ class KafkaCentralConsumer:
         
         elif msg_type == "telemetry":
             # Telemetría en tiempo real
+            msg_timestamp = data.get("timestamp", 0)
+            
+            # ✅ VALIDACIÓN: telemetry debe ser reciente (< 15 segundos)
+            if msg_timestamp > 0:
+                age = time.time() - msg_timestamp
+                if age > 15:
+                    # Silenciosamente ignorar (telemetría vieja es común)
+                    return
+            
             is_supplying = data.get("is_supplying", False)
             
             # Actualizar datos de consumo
@@ -356,8 +409,18 @@ class KafkaCentralConsumer:
                 fields["current_euros"] = fields["total_kwh"] * cp_price
             
             # Actualizar estado solo si cambia entre ACTIVADO ↔ SUMINISTRANDO
-            if is_supplying and current_state != "SUMINISTRANDO":
-                fields["state"] = "SUMINISTRANDO"
+            # ✅ CRÍTICO: Telemetry NUNCA inicia suministros, solo supply_start puede hacerlo
+            if is_supplying and current_state == "SUMINISTRANDO":
+                # Ya está suministrando, solo actualizar datos
+                # Validar que el driver coincide
+                incoming_driver = data.get("driver_id")
+                existing_driver = current_cp.get("current_driver")
+                
+                if incoming_driver and existing_driver and incoming_driver != existing_driver:
+                    print(f"[KAFKA CONSUMER] ⚠️  Driver mismatch en {cp_id}: esperaba {existing_driver}, llegó {incoming_driver}")
+                    # Ignorar esta telemetría
+                    return
+                    
             elif not is_supplying and current_state == "SUMINISTRANDO":
                 # Si deja de suministrar, volver a ACTIVADO
                 fields["state"] = "ACTIVADO"
@@ -366,9 +429,8 @@ class KafkaCentralConsumer:
                 fields["total_kwh"] = 0.0
                 fields["current_euros"] = 0.0
             
-            # Actualizar driver_id si viene en el mensaje
-            if "driver_id" in data and data["driver_id"]:
-                fields["current_driver"] = data["driver_id"]
+            # ✅ Telemetry NO puede cambiar estado a SUMINISTRANDO
+            # Solo supply_start puede iniciar un suministro
             
             if fields:
                 update_cp(cp_id, **fields)

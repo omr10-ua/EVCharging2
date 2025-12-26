@@ -234,6 +234,24 @@ def check_engine_health():
     except Exception as e:
         return "DISCONNECTED"
 
+def get_engine_status():
+    """Obtiene estado completo del Engine (is_supplying, driver, etc.)"""
+    try:
+        sock_engine = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_engine.settimeout(3)
+        sock_engine.connect((ENGINE_HOST, ENGINE_MONITOR_PORT))
+        
+        command = {"type": "get_status"}
+        sock_engine.sendall((json.dumps(command) + '\n').encode())
+        
+        response = sock_engine.recv(4096).decode().strip()
+        sock_engine.close()
+        
+        return json.loads(response)
+    except Exception as e:
+        log_message(f'[MONITOR] ⚠️  Error obteniendo estado Engine: {e}')
+        return None
+
 def send_command_to_engine(command):
     """Envía un comando JSON al Engine"""
     try:
@@ -253,7 +271,7 @@ def monitoring_loop():
     """Loop principal con validación de clave integrada"""
     global sock_central, registered
     
-    last_status = "OK"
+    last_status = None  # None = primer check
     last_key_validation = 0
     forced_stop = False
     
@@ -269,6 +287,75 @@ def monitoring_loop():
                     time.sleep(5)
                     continue
                 last_key_validation = current_time
+                
+                # ✅ TRAS RECONEXIÓN: reenviar estado REAL actual del Engine
+                log_message('[MONITOR] 🔄 Reconectado - Obteniendo estado REAL del Engine...')
+                
+                engine_status_info = get_engine_status()
+                
+                if engine_status_info:
+                    health = engine_status_info.get('health', 'OK')
+                    is_supplying = engine_status_info.get('is_supplying', False)
+                    current_driver = engine_status_info.get('current_driver')
+                    
+                    log_message(f'[MONITOR] 📊 Estado Engine: health={health}, supplying={is_supplying}, driver={current_driver}')
+                    
+                    if health == "OK":
+                        # Decidir estado según si está suministrando o no
+                        if is_supplying and current_driver:
+                            state = "SUMINISTRANDO"
+                            log_message(f'[MONITOR] ⚡ Engine está suministrando a {current_driver}')
+                        else:
+                            state = "ACTIVADO"
+                            log_message('[MONITOR] ✅ Engine está disponible')
+                        
+                        # Enviar estado real a Central
+                        recovery_msg = {
+                            "type": "status_change",
+                            "cp_id": CP_ID,
+                            "state": state
+                        }
+                        
+                        # Si está suministrando, enviar también telemetría completa
+                        if is_supplying and current_driver:
+                            # Enviar telemetría vía socket cifrado
+                            telemetry_msg = {
+                                "type": "telemetry",
+                                "cp_id": CP_ID,
+                                "is_supplying": True,
+                                "driver_id": current_driver
+                            }
+                            encrypted_telemetry = encrypt_message(telemetry_msg)
+                            if encrypted_telemetry:
+                                msg_str = json.dumps(encrypted_telemetry) + "\n"
+                                try:
+                                    sock_central.sendall(msg_str.encode('utf-8'))
+                                    log_message(f'[MONITOR] 📤 Telemetría de suministro activo enviada')
+                                except Exception as e:
+                                    log_message(f'[MONITOR] ⚠️  Error enviando telemetría: {e}')
+                        
+                        send_to_central(recovery_msg)
+                        log_message(f'[MONITOR] ✅ Estado {state} reenviado a Central')
+                        last_status = "OK"
+                    else:
+                        fault_msg = {
+                            "type": "fault",
+                            "cp_id": CP_ID,
+                            "msg": f"Engine en estado {health}"
+                        }
+                        send_to_central(fault_msg)
+                        log_message(f'[MONITOR] ⚠️  Estado {health} reenviado')
+                        last_status = health
+                else:
+                    # No se pudo obtener estado, asumir desconectado
+                    log_message('[MONITOR] ⚠️  No se pudo obtener estado Engine, marcando como DESCONECTADO')
+                    disconnect_msg = {
+                        "type": "fault",
+                        "cp_id": CP_ID,
+                        "msg": "No se puede conectar con Engine"
+                    }
+                    send_to_central(disconnect_msg)
+                    last_status = "DISCONNECTED"
             
             # Verificar comandos de Central
             try:
@@ -365,8 +452,15 @@ def monitoring_loop():
                         last_status = "DISCONNECTED"
                 
                 elif engine_status == "OK" and last_status != "OK":
-                    log_message('[MONITOR] 🟢 Engine recuperado')
-                    last_status = "OK"
+                    # Recuperación de fallo
+                    recovery_msg = {
+                        "type": "status_change",
+                        "cp_id": CP_ID,
+                        "state": "ACTIVADO"
+                    }
+                    if send_to_central(recovery_msg):
+                        log_message('[MONITOR] 🟢 Engine recuperado, notificado a CENTRAL')
+                        last_status = "OK"
             
         except KeyboardInterrupt:
             log_message('[MONITOR] Saliendo...')

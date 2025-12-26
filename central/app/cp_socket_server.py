@@ -46,6 +46,30 @@ class CPSocketServer:
                 }, namespace='/')
             except Exception as e:
                 print(f"[CP SOCKET] Error enviando notificación web: {e}")
+    
+    def _notify_driver_cancel(self, cp_id, reason):
+        """Notifica al driver vía Kafka que su suministro fue cancelado"""
+        cp = get_cp(cp_id)
+        if not cp:
+            return
+        
+        driver_id = cp.get('current_driver')
+        if not driver_id:
+            return
+        
+        if self.producer:
+            cancel_msg = {
+                'type': 'supply_cancelled',
+                'cp_id': cp_id,
+                'driver_id': driver_id,
+                'reason': reason,
+                'timestamp': time.time()
+            }
+            try:
+                self.producer.send_to_driver(driver_id, cancel_msg)
+                print(f"[CP SOCKET] 📤 Cancelación enviada a {driver_id} vía Kafka")
+            except Exception as e:
+                print(f"[CP SOCKET] ❌ Error: {e}")
 
     def send_command_to_cp(self, cp_id, command):
         """Envía un comando a un CP específico"""
@@ -156,7 +180,7 @@ class CPSocketServer:
                             
                             # Auditar fallo
                             if self.audit_logger:
-                                self.audit_logger.log_decryption_failed(cp_id, addr[0])
+                                self.audit_logger.log_decryption_failed(cp_id, addr[0], addr[1])
                             
                             # Notificar panel web
                             self._notify_web(f"🔴 CP {cp_id} - CLAVE DE CIFRADO CORRUPTA", 'error')
@@ -231,12 +255,21 @@ class CPSocketServer:
                                 print(f"[CP SOCKET] 🔑 Clave existente recuperada para {cp_id}")
                         
                         authenticated = True
-                        update_cp(cp_id, state="ACTIVADO", location=location, price=float(price))
+                        
+                        # No forzar ACTIVADO - mantener estado actual o DESCONECTADO
+                        from .data_manager import get_cp
+                        current_cp = get_cp(cp_id)
+                        if current_cp and current_cp.get("state") in ["ACTIVADO", "SUMINISTRANDO"]:
+                            # Mantener estado si era válido
+                            update_cp(cp_id, location=location, price=float(price))
+                        else:
+                            # Si era DESCONECTADO, PARADO o AVERIADO, mantener DESCONECTADO
+                            update_cp(cp_id, state="DESCONECTADO", location=location, price=float(price))
                         
                         print(f"[CP SOCKET] ✅ {cp_id} autenticado correctamente")
                         
                         if self.audit_logger:
-                            self.audit_logger.log_auth_success(cp_id, addr[0])
+                            self.audit_logger.log_auth_success(cp_id, addr[0], addr[1])
                         
                         with self._clients_lock:
                             self._clients[cp_id] = (conn, addr)
@@ -284,12 +317,16 @@ class CPSocketServer:
                     # === AVERÍA ===
                     elif mtype == "fault":
                         fault_msg = obj.get("msg", "Unknown fault")
+                        
+                        # Notificar al driver ANTES de cambiar estado
+                        self._notify_driver_cancel(cp_id, f"CP averiado: {fault_msg}")
+                        
                         update_cp(cp_id, state="AVERIADO")
                         
                         print(f"[CP SOCKET] 🔴 AVERÍA en {cp_id}: {fault_msg}")
                         
                         if self.audit_logger:
-                            self.audit_logger.log_cp_fault(cp_id, addr[0], fault_msg)
+                            self.audit_logger.log_cp_fault(cp_id, addr[0], addr[1], fault_msg)
                         
                         self._notify_web(f"⚠️ AVERÍA en {cp_id}", 'error')
                         
@@ -302,6 +339,9 @@ class CPSocketServer:
                     
                     # === DESCONEXIÓN ===
                     elif mtype == "disconnect":
+                        # Notificar al driver ANTES de cambiar estado
+                        self._notify_driver_cancel(cp_id, "CP desconectado")
+                        
                         update_cp(cp_id, state="DESCONECTADO")
                         print(f"[CP SOCKET] ⚫ CP {cp_id} desconectado")
                         self._notify_web(f"CP {cp_id} desconectado", 'info')
@@ -320,6 +360,9 @@ class CPSocketServer:
         finally:
             if cp_id:
                 try:
+                    # Notificar al driver ANTES de limpiar
+                    self._notify_driver_cancel(cp_id, "CP perdió conexión")
+                    
                     update_cp(
                         cp_id, 
                         state="DESCONECTADO",

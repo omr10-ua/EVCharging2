@@ -48,10 +48,35 @@ def load_data():
 def save_data(data):
     """Guarda el JSON atomizando con un lock para evitar corrupciones."""
     with _lock:
-        tmp = DATA_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, DATA_FILE)
+        try:
+            # Backup del archivo actual
+            if os.path.exists(DATA_FILE):
+                backup = DATA_FILE + ".backup"
+                import shutil
+                shutil.copy2(DATA_FILE, backup)
+            
+            # Escribir temporal
+            tmp = DATA_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            
+            # Reemplazar atómicamente
+            os.replace(tmp, DATA_FILE)
+            
+        except Exception as e:
+            print(f"[DATA] ❌ ERROR CRÍTICO guardando: {e}")
+            
+            # Intentar restaurar backup
+            backup = DATA_FILE + ".backup"
+            if os.path.exists(backup):
+                print(f"[DATA] 🔄 Restaurando desde backup...")
+                import shutil
+                shutil.copy2(backup, DATA_FILE)
+            
+            import traceback
+            traceback.print_exc()
 
 def ensure_cp_exists(cp_id, location=None, price=None):
     """Si no existe el CP en el JSON, lo crea con valores por defecto."""

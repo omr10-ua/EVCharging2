@@ -1,163 +1,191 @@
 """
-AuditLogger - Sistema de auditoría para Central
-Versión que guarda en /central/app/ (directorio YA montado en docker-compose)
+AuditLogger - Sistema de auditoría de eventos
 """
 import os
-from datetime import datetime
 import json
+from datetime import datetime
 
 class AuditLogger:
-    def __init__(self, log_file="/central/app/audit.log"):
+    def __init__(self, log_file="/central/audit.log"):
         self.log_file = log_file
-        print(f"[AUDIT] 📝 Inicializando AuditLogger...")
-        print(f"[AUDIT] 📁 Archivo de log: {log_file}")
-        
         # Crear archivo si no existe
-        if not os.path.exists(log_file):
-            try:
-                with open(log_file, 'w') as f:
-                    f.write(f"# EVCharging Audit Log - Iniciado {datetime.utcnow().isoformat()}\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                print(f"[AUDIT] ✅ Archivo de auditoría creado")
-            except Exception as e:
-                print(f"[AUDIT] ❌ Error creando archivo: {e}")
-        
-        print(f"[AUDIT] ✅ AuditLogger listo")
+        if not os.path.exists(self.log_file):
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            open(self.log_file, 'a').close()
     
-    def log_event(self, event_type, source_ip, description, metadata=None):
+    def log(self, event_type, source_ip, source_port, description, **kwargs):
         """
-        Registra un evento de auditoría
+        Registra un evento en el log de auditoría
         
-        event_type: Tipo de evento (AUTH_SUCCESS, AUTH_FAIL, KEY_GENERATED, etc.)
-        source_ip: IP origen del evento
-        description: Descripción legible
-        metadata: Dict con datos adicionales (opcional)
+        Args:
+            event_type: Tipo de evento (AUTH_SUCCESS, AUTH_FAILURE, etc.)
+            source_ip: IP de origen
+            source_port: Puerto de origen
+            description: Descripción del evento
+            **kwargs: Datos adicionales en formato clave=valor
         """
+        timestamp = datetime.utcnow().isoformat()
+        
+        # Construir entrada de log
+        log_entry = f"[{timestamp}] [{source_ip}:{source_port}] [{event_type}] - {description}"
+        
+        # Añadir datos adicionales si existen
+        if kwargs:
+            log_entry += f" | {json.dumps(kwargs)}"
+        
+        # Escribir en archivo
         try:
-            timestamp = datetime.utcnow().isoformat()
-            
-            # Formatear metadata como JSON compacto
-            meta_str = ""
-            if metadata:
-                meta_str = " | " + json.dumps(metadata, ensure_ascii=False)
-            
-            # Formato: [TIMESTAMP] [IP:PORT] [EVENT_TYPE] - DESCRIPTION | METADATA
-            log_line = f"[{timestamp}] [{source_ip}] [{event_type}] - {description}{meta_str}\n"
-            
-            # Escribir con flush forzado
             with open(self.log_file, 'a') as f:
-                f.write(log_line)
-                f.flush()
-                os.fsync(f.fileno())
-                
+                f.write(log_entry + '\n')
         except Exception as e:
             print(f"[AUDIT] ❌ Error escribiendo log: {e}")
+        
+        # También imprimir en consola
+        print(f"[AUDIT] {log_entry}")
     
-    def log_auth_request(self, cp_id, source_ip):
-        """Registra solicitud de autenticación"""
-        self.log_event(
-            "AUTH_REQUEST",
-            source_ip,
-            f"CP {cp_id} solicitando autenticación",
-            {"username": cp_id}
-        )
-    
-    def log_auth_success(self, cp_id, source_ip):
+    def log_auth_success(self, cp_id, source_ip, source_port):
         """Registra autenticación exitosa"""
-        self.log_event(
+        self.log(
             "AUTH_SUCCESS",
             source_ip,
+            source_port,
             f"CP {cp_id} autenticado exitosamente",
-            {"username": cp_id}
+            cp_id=cp_id,
+            status="success"
         )
     
-    def log_auth_failure(self, cp_id, source_ip, reason):
-        """Registra autenticación fallida"""
-        self.log_event(
+    def log_auth_failure(self, cp_id, source_ip, source_port, reason):
+        """Registra fallo de autenticación"""
+        self.log(
             "AUTH_FAILURE",
             source_ip,
-            f"Autenticación fallida para {cp_id}: {reason}",
-            {"username": cp_id, "reason": reason}
+            source_port,
+            f"Intento de autenticación fallido para {cp_id}: {reason}",
+            cp_id=cp_id,
+            reason=reason,
+            status="denied"
         )
     
-    def log_key_generated(self, cp_id, source_ip):
-        """Registra generación de nueva clave"""
-        self.log_event(
+    def log_key_generated(self, cp_id, source_ip, source_port):
+        """Registra generación de clave"""
+        self.log(
             "KEY_GENERATED",
             source_ip,
-            f"Nueva clave generada para {cp_id}",
-            {}
+            source_port,
+            f"Nueva clave de cifrado generada para {cp_id}",
+            cp_id=cp_id
         )
     
-    def log_key_revoked(self, cp_id, admin_ip, reason=None):
+    def log_key_revoked(self, cp_id, source_ip, source_port):
         """Registra revocación de clave"""
-        metadata = {}
-        if reason:
-            metadata["reason"] = reason
-        
-        self.log_event(
+        self.log(
             "KEY_REVOKED",
-            admin_ip,
-            f"Clave revocada para {cp_id}",
-            metadata
+            source_ip,
+            source_port,
+            f"Clave de cifrado revocada para {cp_id}",
+            cp_id=cp_id
         )
     
-    def log_command_sent(self, cp_id, command, admin_ip):
-        """Registra comando administrativo enviado"""
-        self.log_event(
-            "ADMIN_COMMAND",
-            admin_ip,
+    def log_decryption_failed(self, cp_id, source_ip, source_port):
+        """Registra fallo de descifrado (clave corrupta)"""
+        self.log(
+            "DECRYPTION_FAILED",
+            source_ip,
+            source_port,
+            f"Error descifrando mensaje de {cp_id} - Clave corrupta o inválida",
+            cp_id=cp_id,
+            status="error"
+        )
+        self.log(
+            "KEY_REVOKED",
+            source_ip,
+            source_port,
+            f"Clave de cifrado revocada para {cp_id}",
+            cp_id=cp_id
+        )
+    
+    def log_security_reset(self, keys_count, source_ip, source_port):
+        """Registra reset de seguridad"""
+        self.log(
+            "SECURITY_RESET",
+            source_ip,
+            source_port,
+            f"Reset de seguridad: {keys_count} claves revocadas",
+            keys_revoked=keys_count
+        )
+    
+    def log_command(self, cp_id, command, status, source_ip, source_port):
+        """Registra comando enviado a CP"""
+        self.log(
+            "COMMAND_SENT",
+            source_ip,
+            source_port,
             f"Comando '{command}' enviado a {cp_id}",
-            {"cp_id": cp_id, "command": command}
+            cp_id=cp_id,
+            command=command,
+            status=status
         )
     
-    def log_cp_fault(self, cp_id, source_ip, fault_msg):
-        """Registra fallo/avería de CP"""
-        self.log_event(
+    def log_cp_fault(self, cp_id, fault_reason, source_ip, source_port):
+        """Registra avería de CP"""
+        self.log(
             "CP_FAULT",
             source_ip,
-            f"Avería reportada en {cp_id}: {fault_msg}",
-            {"cp_id": cp_id, "fault": fault_msg}
+            source_port,
+            f"Avería detectada en {cp_id}: {fault_reason}",
+            cp_id=cp_id,
+            reason=fault_reason
         )
     
-    def log_service_start(self, cp_id, driver_id, source_ip):
-        """Registra inicio de servicio"""
-        self.log_event(
-            "SERVICE_START",
+    def log_cp_recovery(self, cp_id, source_ip, source_port):
+        """Registra recuperación de CP"""
+        self.log(
+            "CP_RECOVERY",
             source_ip,
-            f"Servicio iniciado: {driver_id} en {cp_id}",
-            {"cp_id": cp_id, "driver_id": driver_id}
+            source_port,
+            f"CP {cp_id} recuperado de avería",
+            cp_id=cp_id
         )
     
-    def log_service_end(self, cp_id, driver_id, kwh, euros, source_ip):
-        """Registra finalización de servicio"""
-        self.log_event(
-            "SERVICE_END",
+    def log_encryption_test(self, cp_id, status, source_ip, source_port):
+        """Registra test de cifrado"""
+        self.log(
+            "ENCRYPTION_TEST",
             source_ip,
-            f"Servicio finalizado: {driver_id} en {cp_id}",
-            {
-                "cp_id": cp_id,
-                "driver_id": driver_id,
-                "kwh": round(kwh, 3),
-                "euros": round(euros, 2)
-            }
+            source_port,
+            f"Test de cifrado para {cp_id}: {status}",
+            cp_id=cp_id,
+            status=status
         )
     
-    def log_unauthorized_access(self, source_ip, reason):
-        """Registra intento de acceso no autorizado"""
-        self.log_event(
-            "UNAUTHORIZED_ACCESS",
+    def log_decryption_failed(self, cp_id, source_ip, source_port):
+        """Registra fallo de descifrado"""
+        self.log(
+            "DECRYPTION_FAILED",
             source_ip,
-            f"Intento de acceso no autorizado: {reason}",
-            {"reason": reason}
+            source_port,
+            f"Error descifrando mensaje de {cp_id} - posible clave corrupta",
+            cp_id=cp_id,
+            severity="high"
         )
     
-    def log_system_event(self, event, source="SYSTEM"):
-        """Registra evento general del sistema"""
-        self.log_event(
-            "SYSTEM_EVENT",
-            source,
-            event,
-            {}
-        )
+    def get_recent_logs(self, count=100):
+        """Obtiene los últimos N logs"""
+        try:
+            with open(self.log_file, 'r') as f:
+                lines = f.readlines()
+                return [line.strip() for line in lines[-count:]]
+        except Exception as e:
+            print(f"[AUDIT] ❌ Error leyendo logs: {e}")
+            return []
+    
+    def search_logs(self, keyword, count=100):
+        """Busca en los logs por palabra clave"""
+        try:
+            with open(self.log_file, 'r') as f:
+                lines = f.readlines()
+                matching = [line.strip() for line in lines if keyword.lower() in line.lower()]
+                return matching[-count:]
+        except Exception as e:
+            print(f"[AUDIT] ❌ Error buscando en logs: {e}")
+            return []

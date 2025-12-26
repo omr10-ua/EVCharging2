@@ -10,3 +10,23 @@
 [2025-12-19T16:39:33.584664] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
 [2025-12-19T16:41:22.859102] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
 [2025-12-19T16:41:24.871558] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T11:22:41.241642] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:23:38.302231] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:25:14.822855] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:28:41.583742] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:39:34.440862] [172.18.0.1] [KEY_GENERATED] - Nueva clave generada para CP001
+[2025-12-26T11:39:34.460018] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:39:36.628117] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T11:48:11.576078] [172.18.0.1] [KEY_GENERATED] - Nueva clave generada para CP001
+[2025-12-26T11:48:11.685848] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:48:13.932433] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T11:51:39.574084] [172.18.0.1] [KEY_GENERATED] - Nueva clave generada para CP001
+[2025-12-26T11:51:39.582006] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:51:41.613672] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T11:58:43.771408] [172.18.0.1] [KEY_GENERATED] - Nueva clave generada para CP001
+[2025-12-26T11:58:43.800511] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T11:58:47.420680] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T11:59:43.493852] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T12:00:41.658662] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-26T12:00:43.704781] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-26T12:01:47.308061] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
