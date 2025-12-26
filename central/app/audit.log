@@ -1,0 +1,12 @@
+# EVCharging Audit Log - Iniciado 2025-12-19T10:57:12.960254
+[2025-12-19T11:09:40.796128] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T11:14:43.033034] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T11:14:45.085941] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-19T11:15:22.799988] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T11:15:24.850210] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-19T16:11:17.551081] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T16:11:19.572671] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-19T16:39:31.614851] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T16:39:33.584664] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}
+[2025-12-19T16:41:22.859102] [172.18.0.1] [AUTH_SUCCESS] - CP CP001 autenticado exitosamente | {"username": "CP001"}
+[2025-12-19T16:41:24.871558] [172.18.0.1] [CP_FAULT] - Avería reportada en CP001: No se puede conectar con Engine | {"cp_id": "CP001", "fault": "No se puede conectar con Engine"}

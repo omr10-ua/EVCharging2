@@ -1,0 +1,9 @@
+# Central - Requirements
+flask>=3.0.0
+flask-socketio>=5.3.5
+python-socketio>=5.10.0
+kafka-python>=2.0.2
+werkzeug>=3.0.0
+eventlet>=0.33.3
+greenlet>=2.0.0
+cryptography>=41.0.0
