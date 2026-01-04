@@ -1,0 +1,10 @@
+$env:CP_ID="CP002"
+$env:CP_LOCATION="Ottawa"
+$env:CP_PRICE="0.38"
+$env:REGISTRY_URL="http://localhost:8000/api/registry"
+$env:CENTRAL_HOST="localhost"
+$env:CENTRAL_PORT="5001"
+$env:ENGINE_HOST="localhost"
+$env:ENGINE_PORT="9201"
+$env:ENGINE_MONITOR_PORT="6061"
+python main.py

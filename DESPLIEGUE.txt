@@ -118,5 +118,7 @@ export OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
 python3 ev_w.py
 
 
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser //por si no deja ejecutar el script
+
 
 

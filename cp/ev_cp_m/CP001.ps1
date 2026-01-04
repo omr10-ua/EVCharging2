@@ -1,0 +1,10 @@
+$env:CP_ID="CP001"
+$env:CP_LOCATION="Valencia"
+$env:CP_PRICE="0.35"
+$env:REGISTRY_URL="http://localhost:8000/api/registry"
+$env:CENTRAL_HOST="localhost"
+$env:CENTRAL_PORT="5001"
+$env:ENGINE_HOST="localhost"
+$env:ENGINE_PORT="9101"
+$env:ENGINE_MONITOR_PORT="6060"
+python main.py

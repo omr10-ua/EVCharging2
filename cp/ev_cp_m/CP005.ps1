@@ -1,0 +1,10 @@
+$env:CP_ID="CP005"
+$env:CP_LOCATION="Barcelona"
+$env:CP_PRICE="0.33"
+$env:REGISTRY_URL="http://localhost:8000/api/registry"
+$env:CENTRAL_HOST="localhost"
+$env:CENTRAL_PORT="5001"
+$env:ENGINE_HOST="localhost"
+$env:ENGINE_PORT="9501"
+$env:ENGINE_MONITOR_PORT="6064"
+python main.py
